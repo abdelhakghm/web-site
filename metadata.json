@@ -1,0 +1,7 @@
+{
+  "name": "Mr Burger - Professional Fast Food Website",
+  "description": "A dynamic, modern, and mobile-friendly fast-food website for Mr Burger, featuring an editable menu, promotions, and WhatsApp integration.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
