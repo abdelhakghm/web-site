@@ -99,7 +99,7 @@ if (!existing) {
   db.prepare("UPDATE config SET value = ? WHERE key = 'site_config'").run(JSON.stringify(mergedConfig));
 }
 
-async function startServer() {
+async function createServer() {
   const app = express();
   app.use(express.json());
   const PORT = 3000;
@@ -146,24 +146,41 @@ async function startServer() {
     app.use('*', async (req, res, next) => {
       const url = req.originalUrl;
       try {
-        let template = fs.readFileSync(path.resolve(__dirname, 'index.html'), 'utf-8');
-        template = await vite.transformIndexHtml(url, template);
-        res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+        const indexPath = path.resolve(process.cwd(), 'index.html');
+        if (fs.existsSync(indexPath)) {
+          let template = fs.readFileSync(indexPath, 'utf-8');
+          template = await vite.transformIndexHtml(url, template);
+          res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+        } else {
+          next();
+        }
       } catch (e: any) {
         vite.ssrFixStacktrace(e);
         next(e);
       }
     });
   } else {
-    app.use(express.static(path.join(process.cwd(), "dist")));
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(process.cwd(), "dist", "index.html"));
+      const indexPath = path.join(distPath, "index.html");
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(404).send("Not Found");
+      }
     });
   }
 
+  return { app, PORT };
+}
+
+const { app, PORT } = await createServer();
+
+if (process.env.NODE_ENV !== "production" || process.env.VERCEL !== "1") {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 
-startServer().catch(console.error);
+export default app;
