@@ -75,14 +75,18 @@ Notes: ${formData.notes}`;
     window.open(whatsappUrl, '_blank');
   };
 
-  const loadConfig = async () => {
+  const loadConfig = async (retries = 3) => {
     try {
       setError(null);
       const data = await fetchConfig();
       setConfig(data);
     } catch (error: any) {
       console.error("Error loading config:", error);
-      setError(error.message || "Failed to connect to the server.");
+      if (retries > 0) {
+        setTimeout(() => loadConfig(retries - 1), 1000);
+      } else {
+        setError(error.message || "Failed to connect to the server.");
+      }
     }
   };
 

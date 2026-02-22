@@ -9,7 +9,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let db: Database.Database;
 
 try {
-  db = new Database("mrburger.db");
+  const dbPath = path.join(process.cwd(), "mrburger.db");
+  db = new Database(dbPath);
 } catch (e) {
   console.error("Failed to open SQLite database file, using in-memory database:", e);
   db = new Database(":memory:");
