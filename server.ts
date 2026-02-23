@@ -1,28 +1,13 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import pg from "pg";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-let db: Database.Database;
-
-try {
-  const dbPath = path.join(process.cwd(), "mrburger.db");
-  db = new Database(dbPath);
-} catch (e) {
-  console.error("Failed to open SQLite database file, using in-memory database:", e);
-  db = new Database(":memory:");
-}
-
-// Initialize database
-db.exec(`
-  CREATE TABLE IF NOT EXISTS config (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  );
-`);
+let db: any;
+let isPostgres = false;
 
 const defaultConfig = {
   branding: {
@@ -84,19 +69,52 @@ const defaultConfig = {
   ]
 };
 
-// Check if config exists, if not insert default
-const existing = db.prepare("SELECT * FROM config WHERE key = 'site_config'").get() as { value: string } | undefined;
-if (!existing) {
-  db.prepare("INSERT INTO config (key, value) VALUES (?, ?)").run('site_config', JSON.stringify(defaultConfig));
-} else {
-  // Merge existing config with default to ensure new structure is present
-  const currentConfig = JSON.parse(existing.value);
-  const mergedConfig = { ...defaultConfig, ...currentConfig };
+async function getDb() {
+  if (db) return db;
+
+  const dbUrl = process.env.DATABASE_URL;
+  if (dbUrl && dbUrl.startsWith("postgres")) {
+    const pool = new pg.Pool({ connectionString: dbUrl });
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      );
+    `);
+    
+    const res = await pool.query("SELECT value FROM config WHERE key = 'site_config'");
+    if (res.rows.length === 0) {
+      await pool.query("INSERT INTO config (key, value) VALUES ($1, $2)", ['site_config', JSON.stringify(defaultConfig)]);
+    }
+    
+    db = pool;
+    isPostgres = true;
+    return db;
+  }
   
-  // Specifically handle nested objects if they were added
-  mergedConfig.branding = { ...defaultConfig.branding, ...(currentConfig.branding || {}) };
-  
-  db.prepare("UPDATE config SET value = ? WHERE key = 'site_config'").run(JSON.stringify(mergedConfig));
+  try {
+    const { default: Database } = await import("better-sqlite3");
+    const dbPath = path.join(process.cwd(), "mrburger.db");
+    db = new Database(dbPath);
+    
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      );
+    `);
+
+    const existing = db.prepare("SELECT * FROM config WHERE key = 'site_config'").get();
+    if (!existing) {
+      db.prepare("INSERT INTO config (key, value) VALUES (?, ?)").run('site_config', JSON.stringify(defaultConfig));
+    }
+    
+    isPostgres = false;
+    return db;
+  } catch (e) {
+    console.error("Database initialization failed:", e);
+    throw new Error("Database not available. Please check your environment variables.");
+  }
 }
 
 async function createServer() {
@@ -104,27 +122,36 @@ async function createServer() {
   app.use(express.json());
   const PORT = 3000;
 
-  // API routes
-  app.get("/api/config", (req, res) => {
+  app.get("/api/config", async (req, res) => {
     try {
-      const row = db.prepare("SELECT value FROM config WHERE key = 'site_config'").get() as { value: string } | undefined;
-      if (!row) {
-        return res.status(404).json({ error: "Config not found" });
+      const database = await getDb();
+      let value;
+      if (isPostgres) {
+        const result = await database.query("SELECT value FROM config WHERE key = 'site_config'");
+        value = result.rows[0]?.value;
+      } else {
+        const row = database.prepare("SELECT value FROM config WHERE key = 'site_config'").get();
+        value = row?.value;
       }
-      res.json(JSON.parse(row.value));
+      
+      if (!value) return res.status(404).json({ error: "Config not found" });
+      res.json(JSON.parse(value));
     } catch (error: any) {
-      console.error("API Error:", error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.post("/api/config", (req, res) => {
+  app.post("/api/config", async (req, res) => {
     try {
-      const newConfig = req.body;
-      db.prepare("UPDATE config SET value = ? WHERE key = 'site_config'").run(JSON.stringify(newConfig));
+      const database = await getDb();
+      const newConfig = JSON.stringify(req.body);
+      if (isPostgres) {
+        await database.query("UPDATE config SET value = $1 WHERE key = 'site_config'", [newConfig]);
+      } else {
+        database.prepare("UPDATE config SET value = ? WHERE key = 'site_config'").run(newConfig);
+      }
       res.json({ success: true });
     } catch (error: any) {
-      console.error("API Error:", error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -133,7 +160,6 @@ async function createServer() {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
-  // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -142,7 +168,6 @@ async function createServer() {
     });
     app.use(vite.middlewares);
     
-    // Fallback for SPA
     app.use('*', async (req, res, next) => {
       const url = req.originalUrl;
       try {
@@ -175,12 +200,19 @@ async function createServer() {
   return { app, PORT };
 }
 
-const { app, PORT } = await createServer();
-
 if (process.env.NODE_ENV !== "production" || process.env.VERCEL !== "1") {
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  createServer().then(({ app, PORT }) => {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
   });
 }
 
-export default app;
+let vercelApp: any;
+export default async (req: any, res: any) => {
+  if (!vercelApp) {
+    const result = await createServer();
+    vercelApp = result.app;
+  }
+  return vercelApp(req, res);
+};
